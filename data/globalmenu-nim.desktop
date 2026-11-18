@@ -1,0 +1,9 @@
+[Xfce Panel]
+Type=X-XFCE-PanelPlugin
+Encoding=UTF-8
+Name=Global Menu (Nim)
+Comment=Show the active window's menu in the panel
+Icon=open-menu-symbolic
+X-XFCE-Module=globalmenu-nim
+X-XFCE-Internal=true
+X-XFCE-API=2.0

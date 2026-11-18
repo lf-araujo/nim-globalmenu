@@ -1,0 +1,15 @@
+<?xml version="1.0"?>
+<!-- Minimal stock labwc config for global-menu experiments -->
+<labwc_config>
+  <desktops number="2"/>
+  <windowRules>
+    <!-- The plugin host (tests/harness.c) stays above the app being tested. -->
+    <windowRule identifier="harness">
+      <action name="ToggleAlwaysOnTop"/>
+    </windowRule>
+    <!-- Same, for the copy of the host named xfce4-panel (panel-process test). -->
+    <windowRule identifier="xfce4-panel">
+      <action name="ToggleAlwaysOnTop"/>
+    </windowRule>
+  </windowRules>
+</labwc_config>

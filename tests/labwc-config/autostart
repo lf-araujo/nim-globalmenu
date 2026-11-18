@@ -1,0 +1,4 @@
+# Record the private session bus so test commands can reach the apps.
+echo "$DBUS_SESSION_BUS_ADDRESS" > "$XDG_RUNTIME_DIR/nim-globalmenu-test.bus"
+echo "$WAYLAND_DISPLAY" > "$XDG_RUNTIME_DIR/nim-globalmenu-test.display"
+echo "$DISPLAY" > "$XDG_RUNTIME_DIR/nim-globalmenu-test.x11"

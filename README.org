@@ -1,0 +1,370 @@
+#+TITLE: Global menu for Xfce on labwc
+#+AUTHOR: Luis De Araujo
+#+DATE: 2026-11-16
+#+STARTUP: overview
+
+* Goal
+
+Show the active window's menubar in the top panel (macOS-style, or like the
+GNOME Global Menu extension) on Xfce running on labwc under Wayland. Targets:
+GTK3 apps with a classic menubar, and LibreOffice. The in-window menubar is
+kept for now (see [[*Hiding the in-window menubar][below]]). Background and the options considered are in
+=~/Desktop/nim-whisker/README.org= (Q3–Q5).
+
+* Status (2026-11-16, updated)
+
+A working prototype: *File → New Window chosen from the panel plugin opened a
+second Thunar window*, tested on stock labwc 0.20.3 in an isolated headless
+session (see [[*How it was tested][How it was tested]]). Not yet added to your real panel.
+
+** What exists
+
+| Path                              | What it is                                      |
+|-----------------------------------+-------------------------------------------------|
+| =src/nim_globalmenu_plugin.nim=   | The xfce4-panel plugin (menubar in the panel)   |
+| =src/nim_globalmenu.nim=          | CLI: =--windows=, =--print=, =--app ID=         |
+| =src/globalmenu/toplevels.nim=    | Window list and active window (wlr-foreign-toplevel) |
+| =src/globalmenu/finder.nim=       | Finds the D-Bus menu that belongs to a window   |
+| =src/globalmenu/gio.nim=, =gtk.nim= | Minimal bindings                              |
+| =src/nim_globalmenu_registrar.nim= | AppMenu registrar daemon (Qt and other dbusmenu apps) |
+| =src/globalmenu/registrar.nim=    | Registrar interface + client (=GetMenus=)       |
+| =src/globalmenu/dbusmenu.nim=     | =com.canonical.dbusmenu= client (layout, events) |
+| =src/globalmenu/dbusmenubar.nim=  | Draws a dbusmenu as a GtkMenuBar, follows updates |
+| =tests/tdbusmenu.nim=             | Unit tests (dbusmenu layout parsing)            |
+| =tests/with-qt.sh=                | Run a command with the registrar + a Qt app (VLC) |
+| =tests/with-firefox.sh=           | Same with Firefox (throwaway profile)           |
+| =src/nim_globalmenu_appmenu_proxy.nim= | Wayland proxy for Chromium browsers (Brave) |
+| =src/globalmenu/appmenuproxy.nim= | The proxy's message filter                       |
+| =tests/tappmenuproxy.nim=         | Unit tests (proxy filter)                       |
+| =tests/tfinder.nim=               | Unit tests (matching, pairing)                  |
+| =tests/run-labwc.sh=              | Isolated headless labwc on a private D-Bus      |
+| =tests/with-thunar.sh=, =probe-thunar.sh= | Run a command / probe with a test Thunar |
+| =tests/harness.c=                 | Hosts the plugin in a plain window for testing  |
+| =tools/vclick.c=                  | Scripted pointer clicks (virtual-pointer protocol) |
+| =src/hide-module/globalmenu-hide.c= | GTK module: hides menubars while the plugin runs |
+| =src/globalmenu-module/=          | The other agent's module (forces a setting); does not hide anything |
+
+** How it works
+
+1. *Active window*: wlr-foreign-toplevel gives the focused window's app ID
+   and the order windows appeared in.
+2. *Find its menu*: each D-Bus connection on the session bus is matched to
+   the window by program name (process name, executable, the desktop file's
+   =Exec=; LibreOffice windows match =soffice=). On matching connections the
+   object tree is searched for =org.gtk.Menus= objects.
+3. *Pick the right one*: windows and menubars of an app are both in creation
+   order and are paired from the newest end (Thunar's second window got
+   =menubar/1=).
+4. *Show it*: =GDBusMenuModel= → =gtk_menu_bar_new_from_model=, with the
+   app's action groups attached as =unity.*= and =app.*=, so GTK draws the
+   menus and items run over D-Bus.
+5. *App name, always*: the app's name is shown in bold at the left, and
+   opens a small window menu (Minimize, Maximize/Restore, Close Window,
+   through wlr-foreign-toplevel). That is the whole fallback for apps with
+   no usable menu (Firefox, Brave, Zotero, Sublime Text, Evince, ...).
+6. *Menubar hiding*: the plugin owns the bus name =org.nimglobalmenu.Panel=
+   while it runs. =src/hide-module/globalmenu-hide.c= (a small C GTK module,
+   loaded into every GTK3 app) watches that name: while it is owned, any
+   =GtkMenuBar= that gets mapped is hidden; when the name disappears (plugin
+   removed, panel restarted or crashed) the bars it hid are shown again.
+7. *Qt and other dbusmenu apps*: Qt (and Electron, JetBrains IDEs,
+   libdbusmenu apps) export =com.canonical.dbusmenu= menus, but only when
+   =com.canonical.AppMenu.Registrar= is owned *when the app starts*; Qt then
+   also hides its own in-window menubar. =nim-globalmenu-registrar= is that
+   registrar, a separate daemon so registrations survive panel restarts (Qt
+   never registers again). The plugin starts it by D-Bus activation
+   (=GetMenus=), follows its =WindowRegistered=/=WindowUnregistered= signals,
+   and matches each registration to a window by the sender's process, like
+   GTK menus: window IDs mean nothing on Wayland (Qt's are per-process), so
+   the daemon keys entries by sender + ID. =dbusmenubar.nim= builds the GTK
+   menus from =GetLayout= and keeps them current (=opened= event and re-read
+   when a submenu opens, =LayoutUpdated=, =ItemsPropertiesUpdated=); clicks
+   go back as =clicked= events. Labels, separators, check/radio items,
+   disabled/hidden items and shortcut hints are shown; icons are not.
+
+** Why only some apps have a menu
+
+Checked on the real session (read-only): Firefox and Evince both loaded the
+module and export a menubar object, but =Start= returns =[]= for both: the
+exported menus are *empty*. Their menus are not GTK menubars (Firefox draws
+its own; Evince has a header-bar menu and no menubar). Brave/Chromium,
+Zotero (Firefox-based), OnlyOffice and Sublime Text were not running, so not
+checked; they draw their own menus too, so they are expected to export the
+same nothing. Firefox 160 does contain =com.canonical.AppMenu.Registrar=
+code (a different global-menu protocol); whether it can work on labwc is
+not tested.
+
+An empty exported menu is treated as "no menu": the plugin waits 400 ms for
+items and then shows only the app name.
+
+** Several exported objects per app (found on the real session)
+
+Thunar exports *two* menu objects there: the full menu at
+=/org/xfce/Thunar/menus/menubar/0= and an empty one at
+=/org/appmenu/gtk/window/menus/menubar/1=. The first version paired the
+window with the "newest" object, i.e. the empty one, so Thunar's menu showed
+briefly (while only the good object was known) and then vanished. =finder=
+now asks each object for its items (=Start= on group 0, then =End=) and
+drops the empty ones before pairing. Only non-empty objects count, which
+also takes care of Firefox and Evince (all their objects are empty).
+
+Mailspring (Electron) exports no GTK menu object at all: Chromium/Electron
+draw their own menus, like Firefox. Electron's own global-menu support is the
+Canonical registrar/DBusMenu protocol, which on Linux works under X11 only;
+it would need our own registrar and DBusMenu client plus the app forced onto
+XWayland. Not attempted.
+
+** Requirement: apps must export their menu
+
+GTK3 apps only export a classic menubar when =appmenu-gtk-module= is loaded.
+It is already installed; it needs =GTK_MODULES=appmenu-gtk-module= in each
+app's environment. Solus has no =/etc/environment=, but labwc's own file
+works: =~/.config/xfce4/labwc/environment= already reaches the whole
+session (checked: =TERMINAL=ghostty= from that file is in the panel's and
+session's environment). *Added on 2026-11-16* (backup:
+=environment.bak-globalmenu=); labwc reads the file at startup, so it takes
+effect at the next login (=labwc -r= re-reads it for labwc itself only, not
+for the already-running panel). The line now loads both modules:
+
+#+begin_example
+GTK_MODULES=appmenu-gtk-module:/home/luis/.local/lib64/nim-globalmenu/libglobalmenu-hide.so
+#+end_example
+
+Caveat: apps started by D-Bus activation rather than from the panel (e.g.
+Thunar opened by another program) get the D-Bus daemon's environment, not
+the session file's. =dbus-update-activation-environment --systemd
+GTK_MODULES=appmenu-gtk-module= in labwc's =autostart= should cover those;
+untested.
+
+* Findings
+
+** Menus export without any registrar
+
+With =appmenu-gtk-module= alone, Thunar exports =org.gtk.Menus= at
+=/org/xfce/Thunar/menus/menubar/N= (48 labels) and =org.gtk.Actions= at the
+same path; =Activate("New--Window")= opens a window. No
+=com.canonical.AppMenu.Registrar= is needed.
+
+*Correction*: a session log left in this folder (=20261115T143710=, written
+by another agent, =3code=) concluded that a registrar was required because
+"the menu object is empty". That was a test artifact: Thunar is
+single-instance, and a D-Bus-activated =Thunar --gapplication-service=
+started earlier *without* the module kept answering, so every later test
+talked to a Thunar that had never loaded it. =tests/with-thunar.sh= and
+=probe-thunar.sh= quit any running Thunar on the test bus first.
+
+** Hiding the in-window menubar
+:PROPERTIES:
+:CUSTOM_ID: hiding
+:END:
+
+*Solved with =src/hide-module/globalmenu-hide.c=* (see How it works). Tested
+in the isolated session with Thunar: menubar visible with the plugin
+absent, hidden while the plugin runs (the plugin still shows Thunar's full
+menu, so hiding does not break the export), visible again after the plugin
+stopped. Earlier attempts that did not work:
+
+- =gtk-shell-shows-menubar=true= in =gtk-3.0/settings.ini=: no effect.
+- =src/globalmenu-module/globalmenu-gtk-module.c= (written by the other
+  agent; rebuilt and tested here): it loads and sets the property to TRUE
+  (the module's own log confirms), the menu is still exported, and the
+  menubar is *still drawn*. =appmenu-gtk-module= only hides menubars it
+  controls through that property, which Thunar's plain GtkMenuBar is not.
+
+Risk of the working approach: it hides *every* =GtkMenuBar= in every GTK3
+app while the plugin runs. An app whose menubar the export cannot read
+would lose its menu with nothing in the panel to replace it; stopping the
+plugin (removing it from the panel) brings every menubar back. Keyboard
+mnemonics (Alt+F) of hidden menubars do not work.
+
+** GTK4 / libadwaita apps
+
+No classic menubar to export (Ghostty exports actions only). They get the
+name-only fallback.
+
+** LibreOffice: not checked
+
+=soffice= aborts on this machine before doing anything, even
+=soffice --version= (=terminate called after throwing ...
+RuntimeException=), inside and outside my command sandbox and with a
+throwaway profile. Needs checking from a normal terminal:
+
+#+begin_src sh
+soffice --version
+#+end_src
+
+** Plotinus
+
+[[https://github.com/p-e-w/plotinus][Plotinus]] is a different thing: a Ctrl+Shift+P command palette that lists a
+GTK3 app's commands (it reads =gtk_application_get_menubar= and walks
+GtkMenuShell widgets). Written in Vala (no =valac= here), last pushed in
+2021, and loaded the same way (=GTK3_MODULES=), so it has the same
+environment requirement. It could complement a panel menu (search every
+command by typing) but is not a replacement for showing the menubar.
+
+** Hiding fixed again (2026-11-16)
+
+The hide module had been changed to wait for a =Register= call, but could
+never receive one: it tried to own =org.nimglobalmenu.Hide.<pid>= (a bus-name
+element may not start with a digit, so GLib refused), and the plugin called
+=org.nimglobalmenu.Hide.<appId>= with the =g_dbus_proxy_new_sync= arguments
+in the wrong order. Now the module serves the HideManager on the app's own
+session connection (the one appmenu-gtk-module exports the menu on) and the
+plugin calls =Register= there, asynchronously, when it shows the app's menu
+(=Unregister= if the menu turns out empty). Apps stay registered after losing
+focus; the module shows the bars again when =org.nimglobalmenu.Panel= goes
+away. Tested in the isolated session: Thunar's bar visible, hidden on
+=Register=, back on =Unregister=.
+
+Once a registrar runs, =appmenu-gtk-module= itself collapses the menubars
+it exports (normal global-menu behaviour), in apps *and in the panel*; the
+plugin keeps =gtk-shell-shows-menubar= off in the panel process so its own
+menubars stay (tested: harness with =appmenu-gtk-module= + registrar shows
+Thunar's menu, Thunar's own bar hidden). Unlike the hide module, that
+collapse does not undo itself when the panel goes away, because the
+registrar daemon keeps running.
+
+** Brave via the appmenu proxy (2026-11-16)
+
+Chromium-based browsers only build their dbusmenu menubar on Wayland when
+the compositor offers KDE's =org_kde_kwin_appmenu_manager= (and a registrar
+is running); labwc has no such global, so Brave exported nothing.
+=nim-globalmenu-appmenu-proxy= runs Brave behind a Wayland proxy that
+announces the global and answers its requests itself, passing everything
+else through (file descriptors included). For each id Brave gives a pretend
+object, the proxy sends a =wl_display.sync= with that id to labwc, because
+labwc requires client ids in sequence; it drops labwc's replies to those.
+Brave then exports its menu on its own D-Bus connection, where the finder
+picks it up. =~/.local/share/applications/brave-browser.desktop= runs Brave
+through the proxy (delete it to undo).
+
+Chromium quirks handled: =GetLayout= with an empty property list fails (the
+client now names the properties it reads); its menu objects list no
+interfaces when introspected (objects under =/com/canonical/menu/= are
+tried anyway); and its process is =brave= while the app ID is
+=brave-browser= (a program now also matches an app ID that is its name plus
+a =-suffix=, for names of four or more characters).
+
+Tested in the isolated session: Brave on native Wayland through the proxy,
+menu shown in the plugin (File, Edit, View, History, Tools, Profiles, Help),
+File → New tab opened a tab. Brave is single-instance: if it is already
+running without the proxy, a new launch joins that instance (no menu) until
+Brave is fully restarted. If the proxy is killed, Brave loses its display.
+
+** Panel crash on Close Window (fixed 2026-11-16)
+
+Closing a window from the app-name menu after that window was already gone
+called Wayland with a destroyed toplevel handle and crashed the panel
+(coredump at 20:01). Closed windows now drop their handle (their actions do
+nothing), and the plugin clears the name and menu once its window closes.
+
+** Firefox (2026-11-16)
+
+Firefox 160 has a dbusmenu global menu behind =widget.gtk.global-menu.enabled=
+(plus =widget.gtk.global-menu.wayland.enabled= on Wayland). Tested with a
+throwaway profile in the isolated session (=tests/with-firefox.sh=):
+
+- XWayland (=MOZ_ENABLE_WAYLAND=0=): registers =/com/canonical/menu/0= with
+  the registrar; works like Qt.
+- Native Wayland: exports the same full menu at =/com/canonical/menu/N= but
+  never registers it, because on Wayland it announces the menu only through
+  KDE's =org_kde_kwin_appmenu= protocol, which labwc lacks. The finder
+  therefore also picks up dbusmenu objects on connections that match the
+  window's program (as it does for =org.gtk.Menus=). Plugin showed Firefox's
+  menu; a click ran the item. Quirk: while one of our menus is open, Firefox
+  briefly shows its own (auto-hiding) menubar.
+
+*Activation*: the session bus is dbus-broker, which reads service files only
+at startup or on =ReloadConfig=; until then it kept activating
+vala-panel-appmenu's registrar (which exits when idle, dropping every
+registration). =nimble installUser= now calls =ReloadConfig=.
+
+** Qt via the registrar (2026-11-16)
+
+Tested with VLC 3 (Qt5) in the isolated session (=tests/with-qt.sh=; VLC 3
+needs X11, so it ran on the test session's own XWayland =:1=, never the
+real =:0=): VLC registered =/MenuBar/2= with the registrar and hid its own
+menubar; the plugin showed =Vlc= + Media, Playback, Audio, Video, Subtitle,
+Tools, View, Help; Media opened with VLC's items and shortcut hints;
+clicking the check item "Quit at the end of playlist" set it in VLC (read
+back over D-Bus) and the check mark showed on reopening; "Open Multiple
+Files..." and Help → About opened their windows. A native-Wayland Qt app
+was not tested (none installed besides VLC).
+
+- vala-panel-appmenu installs its own D-Bus-activatable registrar
+  (=/usr/share/dbus-1/services/com.canonical.AppMenu.Registrar.service=). It
+  keys entries by window ID only, which collides between Wayland Qt apps;
+  =nimble installUser= puts our service file in =~/.local/share/dbus-1/services=,
+  which takes precedence.
+- *Test caveat*: =appmenu-gtk-module= collapses the plugin's menubars when
+  the plugin is hosted in =tests/harness.c= (a normal window), with or
+  without the registrar, and also with the host renamed =xfce4-panel= or
+  given the dock type hint. In the real panel the menubars do show, so host
+  the harness with =GTK_MODULES== cleared. *Not yet checked*: whether that
+  stays true in the real panel once the registrar runs.
+- Electron (Mailspring) only uses the registrar under X11; not pursued
+  (Mailspring stays on Wayland). Onyx (=~/bin/onyx-10-1046.jar=) is plain
+  Swing (=JMenuBar=): no global-menu support without a Java agent.
+
+* How it was tested
+
+Everything ran in an isolated session: stock labwc headless on a private
+D-Bus (=tests/run-labwc.sh=), Thunar with throwaway config and data
+directories, the plugin hosted in a plain window (=tests/harness.c=). The
+scripts refuse to run unless the private bus is in use, so they cannot reach
+the real session.
+
+- Plugin shows bold =Thunar= plus Thunar's menubar when Thunar is active,
+  and just the bold name when the host window or Evince is; follows focus
+  changes.
+- The name menu's Minimize, Maximize/Restore (label flips) and Close Window
+  each acted on the right window (states read back with
+  =nim-globalmenu --windows=).
+- File menu opens from the plugin with Thunar's real items; New Window ran
+  the action and opened a second window; the new window's menu was
+  =menubar/1=.
+- Unit tests: =nimble test= (matching, pairing, menu choice, dbusmenu
+  layout parsing).
+
+Not tested: inside the real xfce4-panel (positioning, popups from a
+layer-shell panel, a vertical panel), LibreOffice, apps other than Thunar,
+accelerators/check items/radio items, windows being closed and reopened.
+
+** Test-environment notes
+
+- Hosting GTK windows on the private bus needs =NO_AT_BRIDGE=1=: GTK's
+  accessibility bridge asserts in libdbus there (not the plugin).
+- =GLOBALMENU_IGNORE_APPS=harness= makes the plugin ignore the host window,
+  which, unlike the real panel, becomes the active window when clicked.
+- GTK logs =gtk_label_set_text_with_mnemonic: assertion 'str != NULL'= once
+  per menubar built: Thunar's menu contains a label-less item
+  (=unity.0=). Harmless, not filtered.
+
+* Known limitations
+
+- Window-to-menu pairing is a heuristic (program name + creation order); an
+  app with several processes or with closed-and-reopened windows can pair
+  wrongly.
+- The menu search runs synchronously in the panel's main loop (a few D-Bus
+  calls per focus change, cached per app and window count).
+- The plugin runs inside the panel process on Wayland, so a crash in it takes
+  the panel down.
+- Hiding is all-or-nothing per app (see above), and only takes effect in
+  apps started after the login that loads the module.
+
+* Next steps [5/9]
+
+- [X] =GTK_MODULES= added to =~/.config/xfce4/labwc/environment=.
+- [X] Log out and in, add the plugin to the panel and try it (and decide
+  about the D-Bus activation line).
+- [X] Always show the app name with a window menu; hide in-window menubars
+  while the plugin runs.
+- [X] Check =soffice --version= from a normal terminal; then LibreOffice's
+  menu under Wayland.
+- [ ] Try other GTK3 apps; look at check/radio items and accelerators.
+- [ ] Hide the label-less =unity.0= item (cosmetic) if it shows.
+- [X] AppMenu registrar + dbusmenu client (Qt); tested with VLC in the
+  isolated session.
+- [ ] Try the registrar in the real panel; check that the plugin's own
+  menubars still show there (see the =appmenu-gtk-module= caveat).
+- [ ] A native-Wayland Qt app; dbusmenu icons.

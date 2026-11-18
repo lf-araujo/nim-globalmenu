@@ -1,0 +1,6 @@
+build/
+*.so
+*.o
+# Local session log from another tool and stray output; not part of the project.
+20261115T143710
+nohup.out
